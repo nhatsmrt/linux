@@ -290,6 +290,12 @@ struct iattr {
  *  			reference, it should drop it before retrying.  Returned
  *  			by read_folio().
  *
+ * @AOP_RETRY: Inform the caller that the page writeback has failed, that
+ * 			    the page is still locked, and that writeback should be
+ * 			    re-attempted. The VM uses this hint to know that zswap has
+ *  			failed on this page for one reason or another, and should
+ *  			fallback to swap.
+ *
  * address_space_operation functions return these large constants to indicate
  * special semantics to the caller.  These are much larger than the bytes in a
  * page to allow for functions that return the number of bytes operated on in a
@@ -299,6 +305,7 @@ struct iattr {
 enum positive_aop_returns {
 	AOP_WRITEPAGE_ACTIVATE	= 0x80000,
 	AOP_TRUNCATED_PAGE	= 0x80001,
+	AOP_RETRY	= 0x80002
 };
 
 /*

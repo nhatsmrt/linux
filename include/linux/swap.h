@@ -62,7 +62,7 @@ static inline int current_is_kswapd(void)
  */
 #define SWP_PTE_MARKER_NUM 1
 #define SWP_PTE_MARKER     (MAX_SWAPFILES + SWP_HWPOISON_NUM + \
-			    SWP_MIGRATION_NUM + SWP_DEVICE_NUM)
+			    SWP_MIGRATION_NUM + SWP_DEVICE_NUM + SWP_ZSWP_DEVICE_NUM)
 
 /*
  * Unaddressable device memory support. See include/linux/hmm.h and
@@ -97,7 +97,8 @@ static inline int current_is_kswapd(void)
  */
 #ifdef CONFIG_MIGRATION
 #define SWP_MIGRATION_NUM 3
-#define SWP_MIGRATION_READ (MAX_SWAPFILES + SWP_HWPOISON_NUM)
+#define SWP_MIGRATION_READ (MAX_SWAPFILES + SWP_ZSWP_DEVICE_NUM + \
+			SWP_HWPOISON_NUM)
 #define SWP_MIGRATION_READ_EXCLUSIVE (MAX_SWAPFILES + SWP_HWPOISON_NUM + 1)
 #define SWP_MIGRATION_WRITE (MAX_SWAPFILES + SWP_HWPOISON_NUM + 2)
 #else
@@ -109,9 +110,17 @@ static inline int current_is_kswapd(void)
  */
 #ifdef CONFIG_MEMORY_FAILURE
 #define SWP_HWPOISON_NUM 1
-#define SWP_HWPOISON		MAX_SWAPFILES
+#define SWP_HWPOISON		MAX_SWAPFILES + SWP_ZSWP_DEVICE_NUM
 #else
 #define SWP_HWPOISON_NUM 0
+#endif
+
+/* A special zswap swapfile */
+#ifdef CONFIG_ZSWAP
+#define SWP_ZSWP_DEVICE_NUM	1
+#define SWP_ZSWP_DEVICE     MAX_SWAPFILES
+#else
+#define SWP_ZSWP_DEVICE_NUM	0
 #endif
 
 #define MAX_SWAPFILES \
@@ -496,6 +505,18 @@ extern int init_swap_address_space(unsigned int type, unsigned long nr_pages);
 extern void exit_swap_address_space(unsigned int type);
 extern struct swap_info_struct *get_swap_device(swp_entry_t entry);
 sector_t swap_folio_sector(struct folio *folio);
+
+#ifdef CONFIG_ZSWAP
+static inline swp_entry_t get_zswap_slot(void)
+{
+	return get_swap_page_of_type(SWP_ZSWP_DEVICE);
+}
+#else
+static inline swp_entry_t get_zswap_slot(void)
+{
+	return 0;
+}
+#endif
 
 static inline void put_swap_device(struct swap_info_struct *si)
 {

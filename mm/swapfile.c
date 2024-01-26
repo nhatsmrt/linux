@@ -97,7 +97,7 @@ static PLIST_HEAD(swap_active_head);
 static struct plist_head *swap_avail_heads;
 static DEFINE_SPINLOCK(swap_avail_lock);
 
-static struct swap_info_struct *swap_info[MAX_SWAPFILES];
+struct swap_info_struct *swap_info[MAX_SWAPFILES + SWP_ZSWP_DEVICE_NUM];
 
 static DEFINE_MUTEX(swapon_mutex);
 
@@ -109,7 +109,7 @@ atomic_t nr_rotate_swap = ATOMIC_INIT(0);
 
 static struct swap_info_struct *swap_type_to_swap_info(int type)
 {
-	if (type >= MAX_SWAPFILES)
+	if (type >= MAX_SWAPFILES + SWP_ZSWP_DEVICE_NUM)
 		return NULL;
 
 	return READ_ONCE(swap_info[type]); /* rcu_dereference() */
@@ -1620,8 +1620,6 @@ int free_swap_and_cache(swp_entry_t entry)
 	return p != NULL;
 }
 
-#ifdef CONFIG_HIBERNATION
-
 swp_entry_t get_swap_page_of_type(int type)
 {
 	struct swap_info_struct *si = swap_type_to_swap_info(type);
@@ -1638,6 +1636,8 @@ swp_entry_t get_swap_page_of_type(int type)
 fail:
 	return entry;
 }
+
+#ifdef CONFIG_HIBERNATION
 
 /*
  * Find the swap type that corresponds to given device (if any).
@@ -2769,6 +2769,38 @@ static struct swap_info_struct *alloc_swap_info(void)
 	return p;
 }
 
+#ifdef CONFIG_ZSWAP
+static struct swap_info_struct *alloc_zswap_info(void)
+{
+	struct swap_info_struct *p;
+	unsigned int type = SWP_ZSWP_DEVICE;
+
+	p = kvzalloc(struct_size(p, avail_lists, nr_node_ids), GFP_KERNEL);
+	if (!p)
+		return ERR_PTR(-ENOMEM);
+
+	if (percpu_ref_init(&p->users, swap_users_ref_free,
+			    PERCPU_REF_INIT_DEAD, GFP_KERNEL)) {
+		kvfree(p);
+		return ERR_PTR(-ENOMEM);
+	}
+
+	p->type = type;
+
+	/* We do not use the swapfile priority list for zswap's swap info struct */
+	spin_lock(&swap_lock);
+	swap_info[type] = p;
+	p->flags = SWP_USED;
+	spin_unlock(&swap_lock);
+
+	spin_lock_init(&p->lock);
+	spin_lock_init(&p->cont_lock);
+	init_completion(&p->comp);
+
+	return p;
+}
+#endif
+
 static int claim_swapfile(struct swap_info_struct *p, struct inode *inode)
 {
 	int error;
@@ -2904,6 +2936,52 @@ static unsigned long read_swap_header(struct swap_info_struct *p,
 	DIV_ROUND_UP(SWAP_ADDRESS_SPACE_PAGES, SWAPFILE_CLUSTER)
 #define SWAP_CLUSTER_COLS						\
 	max_t(unsigned int, SWAP_CLUSTER_INFO_COLS, SWAP_CLUSTER_SPACE_COLS)
+
+#ifdef CONFIG_ZSWAP
+static void setup_zswap_swap_map(struct swap_info_struct *p,
+					unsigned char *swap_map,
+					struct swap_cluster_info *cluster_info)
+{
+	unsigned long i, idx, maxpages = swapfile_maximum_size;
+	/* XXX: Figure out if we need to omit first page as well */
+	unsigned long nr_good_pages = maxpages - 1;
+	unsigned long nr_clusters = DIV_ROUND_UP(maxpages, SWAPFILE_CLUSTER);
+	unsigned long col = p->cluster_next / SWAPFILE_CLUSTER % SWAP_CLUSTER_COLS;
+	unsigned int j, k;
+
+	cluster_list_init(&p->free_clusters);
+
+	for (i = maxpages; i < round_up(maxpages, SWAPFILE_CLUSTER); i++)
+		inc_cluster_info_page(p, cluster_info, i);
+
+	swap_map[0] = SWAP_MAP_BAD;
+	/*
+	 * Not mark the cluster free yet, no list
+	 * operation involved
+	 */
+	inc_cluster_info_page(p, cluster_info, 0);
+	p->max = maxpages;
+	p->pages = nr_good_pages;
+
+
+	/*
+	 * Reduce false cache line sharing between cluster_info and
+	 * sharing same address space.
+	 */
+	for (k = 0; k < SWAP_CLUSTER_COLS; k++) {
+		j = (k + col) % SWAP_CLUSTER_COLS;
+		for (i = 0; i < DIV_ROUND_UP(nr_clusters, SWAP_CLUSTER_COLS); i++) {
+			idx = i * SWAP_CLUSTER_COLS + j;
+			if (idx >= nr_clusters)
+				continue;
+			if (cluster_count(&cluster_info[idx]))
+				continue;
+			cluster_set_flag(&cluster_info[idx], CLUSTER_FLAG_FREE);
+			cluster_list_add_tail(&p->free_clusters, cluster_info, idx);
+		}
+	}
+}
+#endif
 
 static int setup_swap_map_and_extents(struct swap_info_struct *p,
 					union swap_header *swap_header,
@@ -3669,6 +3747,108 @@ void __folio_throttle_swaprate(struct folio *folio, gfp_t gfp)
 }
 #endif
 
+#ifdef CONFIG_ZSWAP
+static int init_zswap_swapfile(void)
+{
+	struct swap_info_struct *p;
+	int error;
+	unsigned long maxpages = swapfile_maximum_size;
+	unsigned char *swap_map = NULL;
+	struct swap_cluster_info *cluster_info = NULL;
+	int cpu;
+	unsigned long ci, nr_cluster;
+
+	p = alloc_zswap_info();
+	if (IS_ERR(p))
+		return PTR_ERR(p);
+
+	p->flags |= SWP_WRITEOK | SWP_SOLIDSTATE;
+
+	/* ghost swapfile - no backing file or block device */
+	p->swap_file = NULL;
+	p->bdev = NULL;
+	p->bdev_handle = NULL;
+
+	/* Setting up the swap map */
+	swap_map = vzalloc(maxpages);
+	if (!swap_map) {
+		error = -ENOMEM;
+		goto bad_swap;
+	}
+
+	p->cluster_next_cpu = alloc_percpu(unsigned int);
+	if (!p->cluster_next_cpu) {
+		error = -ENOMEM;
+		goto bad_swap;
+	}
+	/* Random start position */
+	for_each_possible_cpu(cpu) {
+		per_cpu(*p->cluster_next_cpu, cpu) =
+			get_random_u32_inclusive(1, p->highest_bit);
+	}
+	nr_cluster = DIV_ROUND_UP(maxpages, SWAPFILE_CLUSTER);
+
+	cluster_info = kvcalloc(nr_cluster, sizeof(*cluster_info),
+				GFP_KERNEL);
+	if (!cluster_info) {
+		error = -ENOMEM;
+		goto bad_swap;
+	}
+
+	for (ci = 0; ci < nr_cluster; ci++)
+		spin_lock_init(&((cluster_info + ci)->lock));
+
+	p->percpu_cluster = alloc_percpu(struct percpu_cluster);
+	if (!p->percpu_cluster) {
+		error = -ENOMEM;
+		goto bad_swap;
+	}
+	for_each_possible_cpu(cpu) {
+		struct percpu_cluster *cluster;
+		cluster = per_cpu_ptr(p->percpu_cluster, cpu);
+		cluster_set_null(&cluster->index);
+	}
+
+	setup_zswap_swap_map(p, swap_map, cluster_info);
+
+	error = init_swap_address_space(p->type, maxpages);
+	if (error)
+		goto bad_swap;
+
+	error = zswap_swapon(p->type, maxpages);
+	if (error)
+		goto free_swap_address_space;
+
+	mutex_lock(&swapon_mutex);
+	enable_swap_info(p, 0, swap_map, cluster_info);
+	mutex_unlock(&swapon_mutex);
+
+	error = 0;
+	goto out;
+
+	zswap_swapoff(p->type);
+free_swap_address_space:
+	exit_swap_address_space(p->type);
+bad_swap:
+	free_percpu(p->percpu_cluster);
+	p->percpu_cluster = NULL;
+	free_percpu(p->cluster_next_cpu);
+	p->cluster_next_cpu = NULL;
+	spin_lock(&swap_lock);
+	p->flags = 0;
+	spin_unlock(&swap_lock);
+	vfree(swap_map);
+	kvfree(cluster_info);
+out:
+	return error;
+}
+#else
+static inline int init_zswap_swapfile(void)
+{
+	return 0;
+}
+#endif
+
 static int __init swapfile_init(void)
 {
 	int nid;
@@ -3689,6 +3869,9 @@ static int __init swapfile_init(void)
 	if (swapfile_maximum_size >= (1UL << SWP_MIG_TOTAL_BITS))
 		swap_migration_ad_supported = true;
 #endif	/* CONFIG_MIGRATION */
+
+	if (init_zswap_swapfile())
+		pr_emerg("Not enogh memory for zswap swapfile. zswap is disabled\n");
 
 	return 0;
 }

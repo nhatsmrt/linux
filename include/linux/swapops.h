@@ -590,6 +590,18 @@ static inline int is_hwpoison_entry(swp_entry_t swp)
 }
 #endif
 
+#ifdef CONFIG_ZSWAP
+static inline bool is_zswap_entry(swp_entry_t entry)
+{
+	return swp_type(entry) == SWP_ZSWP_DEVICE;
+}
+#else
+static inline bool is_zswap_entry(swp_entry_t entry)
+{
+	return false;
+}
+#endif
+
 static inline int non_swap_entry(swp_entry_t entry)
 {
 	return swp_type(entry) >= MAX_SWAPFILES;
