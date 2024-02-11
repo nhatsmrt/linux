@@ -196,9 +196,11 @@ struct zswap_pool {
  * length - the length in bytes of the compressed page data.  Needed during
  *          decompression. For a same value filled page length is 0, and both
  *          pool and lru are invalid and must be ignored.
- * pool - the zswap_pool the entry's data is in
+ * pool - the zswap_pool the entry's data is in. If the pool is null, then the
+ *        entry has been written back.
  * handle - zpool allocation handle that stores the compressed page data
  * value - value of the same-value filled pages which have same content
+ * wbentry - swap entry to locate the written back page.
  * objcg - the obj_cgroup that the compressed memory is charged to
  * lru - handle to the pool's lru used to evict pages.
  */
@@ -210,6 +212,7 @@ struct zswap_entry {
 	union {
 		unsigned long handle;
 		unsigned long value;
+		swp_entry_t wb_swpentry;
 	};
 	struct obj_cgroup *objcg;
 	struct list_head lru;
@@ -1646,7 +1649,7 @@ shrink:
 	goto reject;
 }
 
-bool zswap_load(struct folio *folio)
+bool zswap_load(struct folio *folio, bool synchronous, struct swap_iocb **plug)
 {
 	swp_entry_t swp = folio->swap;
 	pgoff_t offset = swp_offset(swp);
@@ -1666,7 +1669,13 @@ bool zswap_load(struct folio *folio)
 	zswap_rb_erase(&tree->rbroot, entry);
 	spin_unlock(&tree->lock);
 
-	if (entry->length)
+	if (!entry->pool) {
+		/* entry has been written-back */
+		folio->swap = entry->wb_swpentry;
+		swap_read_folio_io(folio, synchrnous, plug);
+		goto free_entry;
+	}
+	else if (entry->length)
 		zswap_decompress(entry, page);
 	else {
 		dst = kmap_local_page(page);
@@ -1678,6 +1687,7 @@ bool zswap_load(struct folio *folio)
 	if (entry->objcg)
 		count_objcg_event(entry->objcg, ZSWPIN);
 
+free_entry:
 	zswap_entry_free(entry);
 
 	folio_mark_dirty(folio);

@@ -484,6 +484,20 @@ static void swap_read_folio_bdev_sync(struct folio *folio,
 	put_task_struct(current);
 }
 
+void swap_read_folio_io(struct folio *folio, bool synchronous,
+		struct swap_iocb **plug)
+{
+	struct swap_info_struct *sis = swp_swap_info(folio->swap);
+
+	if (data_race(sis->flags & SWP_FS_OPS)) {
+		swap_read_folio_fs(folio, plug);
+	} else if (synchronous || (sis->flags & SWP_SYNCHRONOUS_IO)) {
+		swap_read_folio_bdev_sync(folio, sis);
+	} else {
+		swap_read_folio_bdev_async(folio, sis);
+	}
+}
+
 static void swap_read_folio_bdev_async(struct folio *folio,
 		struct swap_info_struct *sis)
 {
@@ -520,7 +534,7 @@ void swap_read_folio(struct folio *folio, bool synchronous,
 	}
 	delayacct_swapin_start();
 
-	if (zswap_load(folio)) {
+	if (zswap_load(folio, synchronous, plug)) {
 		folio_mark_uptodate(folio);
 		folio_unlock(folio);
 	} else if (data_race(sis->flags & SWP_FS_OPS)) {

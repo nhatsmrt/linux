@@ -28,7 +28,8 @@ struct zswap_lruvec_state {
 };
 
 bool zswap_store(struct folio *folio);
-bool zswap_load(struct folio *folio);
+bool zswap_load(struct folio *folio, bool synchronous,
+		struct swap_iocb **plug);
 void zswap_invalidate(swp_entry_t swp);
 int alloc_zswap_trees(void);
 void free_zswap_trees(void);
@@ -45,7 +46,8 @@ static inline bool zswap_store(struct folio *folio)
 	return false;
 }
 
-static inline bool zswap_load(struct folio *folio)
+static inline bool zswap_load(struct folio *folio, bool synchronous,
+		struct swap_iocb **plug)
 {
 	return false;
 }
