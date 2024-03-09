@@ -612,6 +612,8 @@ typedef enum {
 	PAGE_SUCCESS,
 	/* folio is clean and locked */
 	PAGE_CLEAN,
+	/* zswap attempt on folio fails. fallback to swap, if allow */
+	PAGE_RETRY
 } pageout_t;
 
 /*
@@ -674,6 +676,9 @@ static pageout_t pageout(struct folio *folio, struct address_space *mapping,
 		if (res == AOP_WRITEPAGE_ACTIVATE) {
 			folio_clear_reclaim(folio);
 			return PAGE_ACTIVATE;
+		}
+		if (res == AOP_RETRY) {
+			return PAGE_RETRY;
 		}
 
 		if (!folio_test_writeback(folio)) {
@@ -1030,6 +1035,8 @@ static unsigned int shrink_folio_list(struct list_head *folio_list,
 	unsigned int pgactivate = 0;
 	bool do_demote_pass;
 	struct swap_iocb *plug = NULL;
+	/* don't even try to zswap large folios */
+	bool tried_zswap = folio_test_large(folio);
 
 	memset(stat, 0, sizeof(*stat));
 	cond_resched();
@@ -1224,7 +1231,17 @@ retry:
 								folio_list))
 						goto activate_locked;
 				}
-				if (!add_to_swap(folio)) {
+retry_swap:
+				/*
+				 * First pass: allocate a slot in the zswap swapfile,
+				 * Fall back to swap if this allocation fails.
+				 */
+				if (!tried_zswap && add_to_swap(folio, true))
+					goto swap_alloced;
+				else
+					tried_zswap = true;
+
+				if (!add_to_swap(folio, false)) {
 					if (!folio_test_large(folio))
 						goto activate_locked_split;
 					/* Fallback to swap normal pages */
@@ -1235,7 +1252,7 @@ retry:
 					count_memcg_folio_events(folio, THP_SWPOUT_FALLBACK, 1);
 					count_vm_event(THP_SWPOUT_FALLBACK);
 #endif
-					if (!add_to_swap(folio))
+					if (!add_to_swap(folio, false))
 						goto activate_locked_split;
 				}
 			}
@@ -1246,6 +1263,7 @@ retry:
 				goto keep_locked;
 		}
 
+swap_alloced:
 		/*
 		 * If the folio was split above, the tail pages will make
 		 * their own pass through this function and be accounted
@@ -1331,6 +1349,10 @@ retry:
 			 */
 			try_to_unmap_flush_dirty();
 			switch (pageout(folio, mapping, &plug)) {
+			case PAGE_RETRY:
+				folio_free_swap(folio);
+				tried_zswap = true;
+				goto retry_swap;
 			case PAGE_KEEP:
 				goto keep_locked;
 			case PAGE_ACTIVATE:

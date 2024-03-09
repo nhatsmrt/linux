@@ -195,15 +195,20 @@ int swap_writepage(struct page *page, struct writeback_control *wbc)
 		folio_unlock(folio);
 		return ret;
 	}
-	if (zswap_store(folio)) {
-		folio_start_writeback(folio);
-		folio_unlock(folio);
-		folio_end_writeback(folio);
-		return 0;
-	}
-	if (!mem_cgroup_zswap_writeback_enabled(folio_memcg(folio))) {
+
+	if (is_zswap_swpentry(folio->swap)) {
+		if (zswap_store(folio)) {
+			folio_start_writeback(folio);
+			folio_unlock(folio);
+			folio_end_writeback(folio);
+			return 0;
+		}
+
 		folio_mark_dirty(folio);
-		return AOP_WRITEPAGE_ACTIVATE;
+		if (!mem_cgroup_zswap_writeback_enabled(folio_memcg(folio)))
+			return AOP_WRITEPAGE_ACTIVATE;
+
+		return AOP_RETRY;
 	}
 
 	__swap_writepage(folio, wbc);

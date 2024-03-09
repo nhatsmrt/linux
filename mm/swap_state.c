@@ -167,6 +167,7 @@ void __delete_from_swap_cache(struct folio *folio,
 /**
  * add_to_swap - allocate swap space for a folio
  * @folio: folio we want to move to swap
+ * @zswap: whether to allocate from zswap
  *
  * Allocate swap space for the folio and add the folio to the
  * swap cache.
@@ -174,7 +175,7 @@ void __delete_from_swap_cache(struct folio *folio,
  * Context: Caller needs to hold the folio lock.
  * Return: Whether the folio was added to the swap cache.
  */
-bool add_to_swap(struct folio *folio)
+bool add_to_swap(struct folio *folio, bool zswap)
 {
 	swp_entry_t entry;
 	int err;
@@ -182,7 +183,11 @@ bool add_to_swap(struct folio *folio)
 	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
 	VM_BUG_ON_FOLIO(!folio_test_uptodate(folio), folio);
 
-	entry = folio_alloc_swap(folio);
+	if (zswap)
+		entry = get_zswap_slot();
+	else
+		entry = folio_alloc_swap(folio);
+
 	if (!entry.val)
 		return false;
 
@@ -221,6 +226,7 @@ bool add_to_swap(struct folio *folio)
 	return true;
 
 fail:
+	/* XXX: handle zswap case */
 	put_swap_folio(folio, entry);
 	return false;
 }
