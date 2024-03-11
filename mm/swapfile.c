@@ -2528,7 +2528,6 @@ SYSCALL_DEFINE1(swapoff, const char __user *, specialfile)
 	spin_unlock(&p->lock);
 	spin_unlock(&swap_lock);
 	arch_swap_invalidate_area(p->type);
-	zswap_swapoff(p->type);
 	mutex_unlock(&swapon_mutex);
 	free_percpu(p->percpu_cluster);
 	p->percpu_cluster = NULL;
@@ -3254,10 +3253,6 @@ SYSCALL_DEFINE2(swapon, const char __user *, specialfile, int, swap_flags)
 	if (error)
 		goto bad_swap_unlock_inode;
 
-	error = zswap_swapon(p->type, maxpages);
-	if (error)
-		goto free_swap_address_space;
-
 	/*
 	 * Flush any pending IO and dirty mappings before we start using this
 	 * swap device.
@@ -3290,8 +3285,6 @@ SYSCALL_DEFINE2(swapon, const char __user *, specialfile, int, swap_flags)
 
 	error = 0;
 	goto out;
-free_swap_zswap:
-	zswap_swapoff(p->type);
 free_swap_address_space:
 	exit_swap_address_space(p->type);
 bad_swap_unlock_inode:
@@ -3815,7 +3808,7 @@ static int init_zswap_swapfile(void)
 	if (error)
 		goto bad_swap;
 
-	error = zswap_swapon(p->type, maxpages);
+	error = alloc_zswap_trees();
 	if (error)
 		goto free_swap_address_space;
 
@@ -3826,7 +3819,7 @@ static int init_zswap_swapfile(void)
 	error = 0;
 	goto out;
 
-	zswap_swapoff(p->type);
+	free_zswap_trees();
 free_swap_address_space:
 	exit_swap_address_space(p->type);
 bad_swap:

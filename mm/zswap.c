@@ -220,8 +220,8 @@ struct zswap_tree {
 	spinlock_t lock;
 };
 
-static struct zswap_tree *zswap_trees[MAX_SWAPFILES];
-static unsigned int nr_zswap_trees[MAX_SWAPFILES];
+static struct zswap_tree *zswap_trees;
+static unsigned int nr_zswap_trees;
 
 /* RCU-protected iteration */
 static LIST_HEAD(zswap_pools);
@@ -250,8 +250,7 @@ static bool zswap_has_pool;
 
 static inline struct zswap_tree *swap_zswap_tree(swp_entry_t swp)
 {
-	return &zswap_trees[swp_type(swp)][swp_offset(swp)
-		>> SWAP_ADDRESS_SPACE_SHIFT];
+	return &zswap_trees[swp_offset(swp) >> SWAP_ADDRESS_SPACE_SHIFT];
 }
 
 #define zswap_pool_debug(msg, p)				\
@@ -1699,13 +1698,14 @@ void zswap_invalidate(swp_entry_t swp)
 	spin_unlock(&tree->lock);
 }
 
-int zswap_swapon(int type, unsigned long nr_pages)
+int alloc_zswap_trees(void)
 {
+	unsigned long nr_pages = swapfile_maximum_size
 	struct zswap_tree *trees, *tree;
 	unsigned int nr, i;
 
-	nr = DIV_ROUND_UP(nr_pages, SWAP_ADDRESS_SPACE_PAGES);
-	trees = kvcalloc(nr, sizeof(*tree), GFP_KERNEL);
+	nr_zswap_trees = DIV_ROUND_UP(nr_pages, SWAP_ADDRESS_SPACE_PAGES);
+	zswap_trees = kvcalloc(nr, sizeof(*tree), GFP_KERNEL);
 	if (!trees) {
 		pr_err("alloc failed, zswap disabled for swap type %d\n", type);
 		return -ENOMEM;
@@ -1717,26 +1717,23 @@ int zswap_swapon(int type, unsigned long nr_pages)
 		spin_lock_init(&tree->lock);
 	}
 
-	nr_zswap_trees[type] = nr;
-	zswap_trees[type] = trees;
 	return 0;
 }
 
-void zswap_swapoff(int type)
+void free_zswap_trees(void)
 {
-	struct zswap_tree *trees = zswap_trees[type];
 	unsigned int i;
 
 	if (!trees)
 		return;
 
 	/* try_to_unuse() invalidated all the entries already */
-	for (i = 0; i < nr_zswap_trees[type]; i++)
-		WARN_ON_ONCE(!RB_EMPTY_ROOT(&trees[i].rbroot));
+	for (i = 0; i < nr_zswap_trees; i++)
+		WARN_ON_ONCE(!RB_EMPTY_ROOT(&zswap_trees[i].rbroot));
 
-	kvfree(trees);
-	nr_zswap_trees[type] = 0;
-	zswap_trees[type] = NULL;
+	kvfree(zswap_trees);
+	nr_zswap_trees = 0;
+	zswap_trees = NULL;
 }
 
 /*********************************
